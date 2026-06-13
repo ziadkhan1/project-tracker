@@ -1,0 +1,59 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Firestore security rules for Project Tracker
+//
+//  Model:
+//   • allowedUsers/{email}  — the access allowlist. Doc id is the lower-cased
+//                             email. Fields: email, name, role ('admin'|'member').
+//   • tasks/{id}            — the board's tasks.
+//
+//  Access:
+//   • Only signed-in users whose email is in allowedUsers may read/write tasks
+//     and read the allowlist.
+//   • Only admins (or the hard-coded owner) may add/remove users.
+//
+//  Deploy these in: Firebase console → Firestore Database → Rules → Publish.
+//  Keep the owner() email in sync with OWNER_EMAIL in docs/firebase-config.js.
+// ─────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function owner() {
+      return 'xiyadkhan@gmail.com';
+    }
+
+    function emailKey() {
+      return request.auth != null ? request.auth.token.email.lower() : '';
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAllowed() {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/allowedUsers/$(emailKey()));
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        emailKey() == owner() ||
+        (exists(/databases/$(database)/documents/allowedUsers/$(emailKey())) &&
+         get(/databases/$(database)/documents/allowedUsers/$(emailKey())).data.role == 'admin')
+      );
+    }
+
+    match /allowedUsers/{email} {
+      // Any allowed user can see who's on the team (needed for assignee lists).
+      allow read: if isAllowed() || emailKey() == owner();
+      // Only admins (or the owner) manage the allowlist.
+      allow write: if isAdmin();
+    }
+
+    match /tasks/{taskId} {
+      allow read, write: if isAllowed();
+    }
+  }
+}

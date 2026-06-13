@@ -1,13 +1,60 @@
-/* Project Tracker — front-end preview
-   Pure client-side: state lives in localStorage so the board persists across
-   reloads with no backend. Swap the `store` layer for an API later.
+/* Project Tracker — Firebase-backed team board
+   ─────────────────────────────────────────────────────────────────────────
+   • Auth     : Google Sign-In via Firebase Auth.
+   • Access   : gated by an `allowedUsers` allowlist in Firestore. Admins manage
+                it from the in-app Admin page; the OWNER_EMAIL is always an admin.
+   • Storage  : tasks live in Firestore (`tasks`), synced live to every signed-in
+                client. Assignable members are the allowed users themselves.
 
    Two views:
-   • Board    — Kanban, the developer's day-to-day view.
-   • Timeline — a Gantt-style project-wide view with an overall progress summary. */
+   • Board    — Kanban, the day-to-day view.
+   • Timeline — a Gantt-style project-wide view with a progress summary. */
+
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
+import {
+  getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+} from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js';
+import {
+  getFirestore, collection, doc, getDoc, setDoc, deleteDoc, onSnapshot,
+} from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js';
+import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
 
 (() => {
   'use strict';
+
+  // ── DOM helpers ────────────────────────────────────────────────────────
+  const $  = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+  function showScreen(name) {
+    ['boot', 'config', 'signin', 'denied', 'app'].forEach((s) => {
+      document.getElementById(s + '-screen').classList.toggle('hidden', s !== name);
+    });
+  }
+
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.add('hidden'), 4000);
+  }
+
+  // ── Setup gate ─────────────────────────────────────────────────────────
+  const configReady = !Object.values(firebaseConfig).some(
+    (v) => typeof v === 'string' && v.includes('REPLACE_ME')
+  );
+  if (!configReady) {
+    showScreen('config');
+    return;
+  }
+
+  // ── Firebase init ──────────────────────────────────────────────────────
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getFirestore(app);
+  const ownerKey = OWNER_EMAIL.trim().toLowerCase();
 
   // ── Configuration ──────────────────────────────────────────────────────
   const COLUMNS = [
@@ -17,43 +64,20 @@
     { id: 'done',     title: 'Done',        accent: '#30a46c' },
   ];
   const STATUS = Object.fromEntries(COLUMNS.map((c) => [c.id, c]));
-
-  // How "done" each status counts as, for progress roll-ups.
   const STATUS_PROGRESS = { todo: 0, progress: 50, review: 80, done: 100 };
 
   const AVATAR_COLORS = ['#e5484d', '#4f46e5', '#30a46c', '#f5a524', '#8b5cf6', '#0ea5e9', '#d6409f'];
   const DAY_MS    = 86400000;
-  const DAY_WIDTH = 38;                 // px per day in the Gantt
-  const STORE_KEY = 'project-tracker/v1';
+  const DAY_WIDTH = 38;
 
-  // ── Seed data (first run only) ─────────────────────────────────────────
-  const SEED = {
-    members: [
-      { id: 'm1', name: 'Aisha Khan' },
-      { id: 'm2', name: 'Ben Ortiz' },
-      { id: 'm3', name: 'Chen Wei' },
-      { id: 'm4', name: 'Dara Singh' },
-    ],
-    tasks: [
-      { id: 't1', title: 'Define MVP scope',           desc: 'Agree the feature cut for v1 with the team.',  assignee: 'm1', reviewer: 'm3', priority: 'high',   status: 'done',     start: '2026-05-26', due: '2026-05-29' },
-      { id: 't2', title: 'Wireframe the board UI',      desc: 'Low-fi mockups for the Kanban layout.',        assignee: 'm3', reviewer: 'm1', priority: 'medium', status: 'done',     start: '2026-05-28', due: '2026-06-02' },
-      { id: 't3', title: 'Set up component library',    desc: 'Buttons, cards, modal, form fields.',          assignee: 'm2', reviewer: 'm3', priority: 'medium', status: 'progress', start: '2026-06-03', due: '2026-06-12',
-        subtasks: [
-          { id: 's1', title: 'Buttons', done: true },
-          { id: 's2', title: 'Card + badge', done: true },
-          { id: 's3', title: 'Modal + form fields', done: false },
-          { id: 's4', title: 'Avatars', done: false },
-        ] },
-      { id: 't4', title: 'Drag-and-drop between lanes', desc: 'Move cards across status columns.',            assignee: 'm2', reviewer: 'm1', priority: 'high',   status: 'progress', start: '2026-06-04', due: '2026-06-10',
-        subtasks: [
-          { id: 's5', title: 'dragstart / dragend', done: true },
-          { id: 's6', title: 'drop updates status', done: false },
-        ] },
-      { id: 't5', title: 'Review accessibility',        desc: 'Keyboard nav + contrast pass.',                assignee: 'm4', reviewer: 'm2', priority: 'low',    status: 'review',   start: '2026-06-06', due: '2026-06-15' },
-      { id: 't6', title: 'Write onboarding copy',       desc: 'Empty states and first-run hints.',            assignee: 'm1', reviewer: null, priority: 'low',    status: 'todo',     start: '2026-06-09', due: '2026-06-13' },
-      { id: 't7', title: 'Plan backend API',            desc: 'Shape the endpoints to replace localStorage.', assignee: 'm3', reviewer: 'm4', priority: 'medium', status: 'todo',     start: '2026-06-11', due: '2026-06-20' },
-    ],
-  };
+  // ── App state ──────────────────────────────────────────────────────────
+  let state = { members: [], tasks: [] };
+  let currentUser = null;          // { email, name, photo, role }
+  let filterMember = null;         // member id (== email key) or null
+  let view = 'board';
+  const collapsed = new Set();
+  let unsubTasks = null;
+  let unsubUsers = null;
 
   // ── Date helpers ─────────────────────────────────────────────────────
   const parseDate = (s) => (s ? new Date(s + 'T00:00:00') : null);
@@ -62,49 +86,17 @@
   const dayIndex = (from, d) => Math.round((d - from) / DAY_MS);
   const todayMidnight = () => { const t = new Date(); t.setHours(0, 0, 0, 0); return t; };
 
-  // ── Store (with a small migration) ─────────────────────────────────────
-  const store = {
-    load() {
-      let s;
-      try {
-        const raw = localStorage.getItem(STORE_KEY);
-        s = raw ? JSON.parse(raw) : structuredClone(SEED);
-      } catch (_) { s = structuredClone(SEED); }
-      // Migrate: every task needs a `start` for the timeline. Backfill missing
-      // ones from the due date (or today) without disturbing existing data.
-      let changed = false;
-      s.tasks.forEach((t) => {
-        if (!t.start) {
-          const base = t.due ? addDays(parseDate(t.due), -3) : todayMidnight();
-          t.start = toISO(base);
-          changed = true;
-        }
-        if (!Array.isArray(t.subtasks)) { t.subtasks = []; changed = true; }
-        if (typeof t.paused !== 'boolean') { t.paused = false; changed = true; }
-        if (!('reviewer' in t)) { t.reviewer = null; changed = true; }
-      });
-      if (changed) this.save(s);
-      return s;
-    },
-    save(s) { localStorage.setItem(STORE_KEY, JSON.stringify(s)); },
-  };
-
-  let state = store.load();
-  let filterMember = null;        // member id or null
-  let view = 'board';             // 'board' | 'timeline'
-  const collapsed = new Set();    // task ids whose subtask hierarchy is collapsed
-  const persist = () => store.save(state);
-
-  // ── DOM helpers ────────────────────────────────────────────────────────
-  const $  = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-
+  // ── Generic helpers ────────────────────────────────────────────────────
   const memberById = (id) => state.members.find((m) => m.id === id);
   const initials = (name) => name.split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
   const colorFor = (id) => {
     const idx = state.members.findIndex((m) => m.id === id);
     return AVATAR_COLORS[(idx < 0 ? 0 : idx) % AVATAR_COLORS.length];
   };
+  const uid = () => 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  const sid = () => 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4);
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   function avatarEl(memberId, { sm = false, interactive = false } = {}) {
     const m = memberById(memberId);
@@ -123,8 +115,6 @@
     return el;
   }
 
-  // Small "reviewer" marker: an eye glyph + the reviewer's avatar. Returns null
-  // when no reviewer is set, so callers can append unconditionally.
   function reviewerChip(memberId) {
     if (!memberId) return null;
     const m = memberById(memberId);
@@ -148,29 +138,62 @@
     return { label, overdue };
   }
 
-  const uid = () => 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
   const visibleTasks = () => state.tasks.filter((t) => !filterMember || t.assignee === filterMember);
 
-  // Progress %: driven by subtask completion when a task has any, otherwise by status.
   function taskProgress(t) {
     const subs = t.subtasks || [];
     if (subs.length) return Math.round((subs.filter((s) => s.done).length / subs.length) * 100);
     return STATUS_PROGRESS[t.status] ?? 0;
   }
 
-  // Toggle one subtask's done state directly on the live data (inline, no modal).
-  function setSubtaskDone(taskId, subId, done) {
-    const t = state.tasks.find((x) => x.id === taskId);
-    const s = t && (t.subtasks || []).find((x) => x.id === subId);
-    if (s) { s.done = done; persist(); render(); }
-  }
-
   function toggleCollapse(taskId) {
     collapsed.has(taskId) ? collapsed.delete(taskId) : collapsed.add(taskId);
     render();
+  }
+
+  // ── Firestore writes ─────────────────────────────────────────────────
+  function normalizeTask(t) {
+    return {
+      title:    t.title || '',
+      desc:     t.desc || '',
+      assignee: t.assignee || null,
+      reviewer: t.reviewer || null,
+      priority: t.priority || 'medium',
+      status:   t.status || 'todo',
+      start:    t.start || toISO(todayMidnight()),
+      due:      t.due || '',
+      paused:   !!t.paused,
+      subtasks: (t.subtasks || []).map((s) => ({ id: s.id, title: s.title, done: !!s.done })),
+    };
+  }
+
+  async function createTask(data) {
+    const id = uid();
+    try {
+      await setDoc(doc(db, 'tasks', id), { ...normalizeTask(data), createdAt: Date.now() });
+    } catch (e) { toast('Could not save task: ' + e.message); }
+  }
+  async function updateTask(id, data) {
+    try {
+      await setDoc(doc(db, 'tasks', id), normalizeTask(data), { merge: true });
+    } catch (e) { toast('Could not save task: ' + e.message); }
+  }
+  async function removeTask(id) {
+    try { await deleteDoc(doc(db, 'tasks', id)); }
+    catch (e) { toast('Could not delete task: ' + e.message); }
+  }
+
+  async function setSubtaskDone(taskId, subId, done) {
+    const t = state.tasks.find((x) => x.id === taskId);
+    if (!t) return;
+    const subs = (t.subtasks || []).map((s) => (s.id === subId ? { ...s, done } : s));
+    try { await setDoc(doc(db, 'tasks', taskId), { subtasks: subs }, { merge: true }); }
+    catch (e) { toast('Could not update subtask: ' + e.message); }
+  }
+
+  async function moveTask(id, status) {
+    try { await setDoc(doc(db, 'tasks', id), { status }, { merge: true }); }
+    catch (e) { toast('Could not move task: ' + e.message); }
   }
 
   // ── Team strip + filter banner ─────────────────────────────────────────
@@ -237,7 +260,7 @@
         column.classList.remove('drag-over');
         const id = e.dataTransfer.getData('text/plain');
         const task = state.tasks.find((t) => t.id === id);
-        if (task && task.status !== col.id) { task.status = col.id; persist(); render(); }
+        if (task && task.status !== col.id) moveTask(id, col.id);
       });
 
       board.appendChild(column);
@@ -265,11 +288,10 @@
       </div>
       ${t.desc ? `<p class="card-desc">${escapeHtml(t.desc)}</p>` : ''}`;
 
-    // Subtask hierarchy — visible & toggleable right on the card.
     if (subs.length) {
       const tree = document.createElement('div');
       tree.className = 'subtree';
-      tree.addEventListener('click', (e) => e.stopPropagation());   // don't open the modal
+      tree.addEventListener('click', (e) => e.stopPropagation());
 
       const toggle = document.createElement('button');
       toggle.type = 'button';
@@ -332,7 +354,7 @@
   // ── Timeline (Gantt) view ──────────────────────────────────────────────
   function taskSpan(t) {
     const start = parseDate(t.start) || todayMidnight();
-    const end   = parseDate(t.due) || start;          // no due → single-day bar
+    const end   = parseDate(t.due) || start;
     return { start, end: end < start ? start : end };
   }
 
@@ -351,7 +373,6 @@
       return;
     }
 
-    // Range = earliest start to latest end, padded by a day each side.
     let min = taskSpan(tasks[0]).start, max = taskSpan(tasks[0]).end;
     tasks.forEach((t) => {
       const { start, end } = taskSpan(t);
@@ -384,7 +405,6 @@
       const row = document.createElement('div');
       row.className = 'gantt-row';
 
-      // left label (chevron when it has subtasks, ⏸ prefix when paused)
       const label = document.createElement('div');
       label.className = 'gantt-label';
       if (subs.length) {
@@ -405,7 +425,6 @@
       label.appendChild(name);
       row.appendChild(label);
 
-      // track + bar
       const track = document.createElement('div');
       track.className = 'gantt-track';
       track.style.width = trackWidth + 'px';
@@ -422,7 +441,7 @@
       bar.className = 'gantt-bar' + (t.paused ? ' paused' : '');
       bar.style.left  = (offset * DAY_WIDTH + 3) + 'px';
       bar.style.width = (duration * DAY_WIDTH - 6) + 'px';
-      bar.style.background = color + '33';            // light track for the bar
+      bar.style.background = color + '33';
       bar.title = subs.length
         ? `${t.title} · ${pct}% (${subs.filter((s) => s.done).length}/${subs.length} subtasks)`
         : `${t.title} · ${pct}% (${STATUS[t.status]?.title})`;
@@ -447,7 +466,6 @@
 
       board.appendChild(row);
 
-      // Indented subtask child rows (hierarchy + per-subtask progress).
       if (subs.length && !collapsed.has(t.id)) {
         subs.forEach((st) => {
           const srow = document.createElement('div');
@@ -490,7 +508,6 @@
     });
 
     gantt.appendChild(board);
-    // Scroll so "today" is roughly in view on first paint.
     if (todayInRange) gantt.scrollLeft = Math.max(0, todayIdx * DAY_WIDTH - 200);
   }
 
@@ -507,7 +524,6 @@
     track.className = 'gantt-track';
     track.style.width = trackWidth + 'px';
 
-    // month strip
     const months = document.createElement('div');
     months.className = 'gantt-months';
     let m = -1, span = null;
@@ -526,7 +542,6 @@
     $$('.gantt-month', months).forEach((el) => { el.style.width = (+el.dataset.days * DAY_WIDTH) + 'px'; });
     track.appendChild(months);
 
-    // day strip
     const days = document.createElement('div');
     days.className = 'gantt-days';
     const todayTime = today.getTime();
@@ -560,7 +575,6 @@
       `<span class="summary-chip"><span class="dot" style="background:${c.accent}"></span>${c.title} ${counts[c.id]}</span>`
     ).join('');
 
-    // proportional progress bar segmented by status weight
     const segs = total ? COLUMNS.map((c) => {
       const w = (counts[c.id] / total) * 100;
       return w > 0 ? `<span style="width:${w}%;background:${c.accent}"></span>` : '';
@@ -579,11 +593,9 @@
       <div class="summary-bar">${segs}</div>`;
   }
 
-  // ── Modal ───────────────────────────────────────────────────────────────
+  // ── Task modal ──────────────────────────────────────────────────────────
   const overlay = $('#modal-overlay');
-  let modalSubtasks = [];           // working copy; committed to the task on Save
-
-  const sid = () => 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4);
+  let modalSubtasks = [];
 
   function renderSubtasks() {
     const list = $('#subtask-list');
@@ -626,13 +638,8 @@
     modalSubtasks.push({ id: sid(), title, done: false });
     input.value = '';
     renderSubtasks();
-    input.focus();                  // stay put so several can be added in a row
+    input.focus();
   }
-
-  $('#subtask-add-btn').addEventListener('click', addSubtask);
-  $('#subtask-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); addSubtask(); }
-  });
 
   function fillSelects() {
     const people = state.members.map((m) => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
@@ -665,6 +672,258 @@
 
   const closeModal = () => overlay.classList.add('hidden');
 
+  // ── Admin: manage users ─────────────────────────────────────────────────
+  const adminOverlay = $('#admin-overlay');
+
+  function openAdmin() {
+    if (currentUser?.role !== 'admin') return;
+    $('#admin-error').classList.add('hidden');
+    $('#add-user-form').reset();
+    renderUserList();
+    adminOverlay.classList.remove('hidden');
+    $('#u-email').focus();
+  }
+  const closeAdmin = () => adminOverlay.classList.add('hidden');
+
+  function renderUserList() {
+    const list = $('#user-list');
+    list.innerHTML = '';
+    if (!state.members.length) {
+      list.innerHTML = '<li class="user-empty">No users yet.</li>';
+      return;
+    }
+    state.members.forEach((m) => {
+      const li = document.createElement('li');
+      li.className = 'user-row';
+
+      const av = avatarEl(m.id, { sm: true });
+      const info = document.createElement('div');
+      info.className = 'user-info';
+      info.innerHTML =
+        `<span class="user-row-name">${escapeHtml(m.name)}</span>` +
+        `<span class="user-row-email">${escapeHtml(m.email)}</span>`;
+
+      const right = document.createElement('div');
+      right.className = 'user-row-right';
+
+      const roleSel = document.createElement('select');
+      roleSel.className = 'role-select';
+      roleSel.innerHTML = '<option value="member">Member</option><option value="admin">Admin</option>';
+      roleSel.value = m.role;
+      const isSelf  = m.id === currentUser.email;
+      const isOwner = m.id === ownerKey;
+      roleSel.disabled = isOwner;                       // owner stays admin
+      roleSel.addEventListener('change', () => changeRole(m, roleSel.value));
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'icon-btn user-del';
+      del.textContent = '🗑';
+      del.title = isOwner ? 'The owner can’t be removed' : (isSelf ? 'You can’t remove yourself' : 'Remove user');
+      del.disabled = isOwner || isSelf;
+      del.addEventListener('click', () => removeUser(m));
+
+      right.append(roleSel, del);
+      li.append(av, info, right);
+      if (isSelf) {
+        const you = document.createElement('span');
+        you.className = 'you-tag';
+        you.textContent = 'you';
+        info.appendChild(you);
+      }
+      list.appendChild(li);
+    });
+  }
+
+  async function addUser(e) {
+    e.preventDefault();
+    const email = $('#u-email').value.trim().toLowerCase();
+    const name  = $('#u-name').value.trim();
+    const role  = $('#u-role').value;
+    const err = $('#admin-error');
+    err.classList.add('hidden');
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      err.textContent = 'Enter a valid email address.';
+      err.classList.remove('hidden');
+      return;
+    }
+    try {
+      await setDoc(doc(db, 'allowedUsers', email), {
+        email,
+        name: name || email.split('@')[0],
+        role,
+        addedBy: currentUser.email,
+        addedAt: Date.now(),
+      });
+      $('#add-user-form').reset();
+      $('#u-email').focus();
+    } catch (e2) {
+      err.textContent = 'Could not add user: ' + e2.message;
+      err.classList.remove('hidden');
+    }
+  }
+
+  async function changeRole(member, role) {
+    try { await setDoc(doc(db, 'allowedUsers', member.id), { role }, { merge: true }); }
+    catch (e) { toast('Could not change role: ' + e.message); renderUserList(); }
+  }
+
+  async function removeUser(member) {
+    if (!confirm(`Remove ${member.name} (${member.email})? They will lose access.`)) return;
+    try { await deleteDoc(doc(db, 'allowedUsers', member.id)); }
+    catch (e) { toast('Could not remove user: ' + e.message); }
+  }
+
+  // ── Live subscriptions ──────────────────────────────────────────────────
+  function subscribe() {
+    unsubUsers = onSnapshot(collection(db, 'allowedUsers'), (snap) => {
+      state.members = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0) || a.name.localeCompare(b.name));
+      // If the current user's row was deleted while they're online, kick them out.
+      if (currentUser && currentUser.email !== ownerKey &&
+          !state.members.some((m) => m.id === currentUser.email)) {
+        toast('Your access was removed.');
+        signOut(auth);
+        return;
+      }
+      if (!adminOverlay.classList.contains('hidden')) renderUserList();
+      render();
+    }, (err) => toast('Lost connection to users: ' + err.message));
+
+    unsubTasks = onSnapshot(collection(db, 'tasks'), (snap) => {
+      state.tasks = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .map((t) => ({ ...t, subtasks: Array.isArray(t.subtasks) ? t.subtasks : [] }))
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      render();
+    }, (err) => toast('Lost connection to tasks: ' + err.message));
+  }
+
+  function unsubscribe() {
+    if (unsubTasks) { unsubTasks(); unsubTasks = null; }
+    if (unsubUsers) { unsubUsers(); unsubUsers = null; }
+    state = { members: [], tasks: [] };
+  }
+
+  // ── Render orchestration ─────────────────────────────────────────────────
+  function render() {
+    if (!currentUser) return;
+    renderTeam();
+    renderFilterBanner();
+
+    const isBoard = view === 'board';
+    $('#board-view').classList.toggle('hidden', !isBoard);
+    $('#timeline-view').classList.toggle('hidden', isBoard);
+    $$('#view-switch .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+
+    if (isBoard) renderBoard();
+    else         renderTimeline();
+  }
+
+  // ── User chip ─────────────────────────────────────────────────────────
+  function paintUserChip() {
+    const av = $('#user-avatar');
+    av.innerHTML = '';
+    av.style.background = '';
+    if (currentUser.photo) {
+      av.style.backgroundImage = `url(${currentUser.photo})`;
+      av.style.backgroundSize = 'cover';
+    } else {
+      av.textContent = initials(currentUser.name || currentUser.email);
+      av.style.background = AVATAR_COLORS[1];
+    }
+    $('#user-name').textContent = currentUser.name || currentUser.email;
+    $('#admin-btn').classList.toggle('hidden', currentUser.role !== 'admin');
+  }
+
+  // ── Auth flow ───────────────────────────────────────────────────────────
+  async function resolveAccess(user) {
+    const key = user.email.trim().toLowerCase();
+
+    // Bootstrap: make sure the owner always has an admin row to sign in against.
+    if (key === ownerKey) {
+      try {
+        const ref = doc(db, 'allowedUsers', key);
+        const snap = await getDoc(ref);
+        if (!snap.exists() || snap.data().role !== 'admin') {
+          await setDoc(ref, {
+            email: key,
+            name: user.displayName || key.split('@')[0],
+            role: 'admin',
+            addedBy: 'bootstrap',
+            addedAt: snap.exists() ? (snap.data().addedAt || Date.now()) : Date.now(),
+          }, { merge: true });
+        }
+      } catch (e) { /* rules allow this for the owner; ignore transient errors */ }
+    }
+
+    let allowed = key === ownerKey;
+    let role = 'admin';
+    if (!allowed) {
+      try {
+        const snap = await getDoc(doc(db, 'allowedUsers', key));
+        if (snap.exists()) { allowed = true; role = snap.data().role || 'member'; }
+      } catch (e) { /* not allowed → read denied by rules */ }
+    }
+
+    if (!allowed) {
+      $('#denied-email').textContent = user.email;
+      showScreen('denied');
+      return;
+    }
+
+    currentUser = { email: key, name: user.displayName || key, photo: user.photoURL || '', role };
+    paintUserChip();
+    subscribe();
+    showScreen('app');
+  }
+
+  onAuthStateChanged(auth, (user) => {
+    unsubscribe();
+    currentUser = null;
+    if (user) {
+      resolveAccess(user);
+    } else {
+      showScreen('signin');
+    }
+  });
+
+  async function doSignIn() {
+    const err = $('#signin-error');
+    err.classList.add('hidden');
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch (e) {
+      if (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') return;
+      err.textContent = e.code === 'auth/unauthorized-domain'
+        ? 'This domain isn’t authorised in Firebase. Add it under Authentication → Settings → Authorized domains.'
+        : 'Sign-in failed: ' + e.message;
+      err.classList.remove('hidden');
+    }
+  }
+
+  // ── Wiring ──────────────────────────────────────────────────────────────
+  $('#google-signin').addEventListener('click', doSignIn);
+  $('#denied-signout').addEventListener('click', () => signOut(auth));
+  $('#signout-btn').addEventListener('click', () => signOut(auth));
+
+  $('#admin-btn').addEventListener('click', openAdmin);
+  $('#admin-close').addEventListener('click', closeAdmin);
+  $('#add-user-form').addEventListener('submit', addUser);
+  adminOverlay.addEventListener('click', (e) => { if (e.target === adminOverlay) closeAdmin(); });
+
+  $('#add-task-btn').addEventListener('click', () => openModal(null));
+  $('#modal-close').addEventListener('click', closeModal);
+  $('#cancel-task').addEventListener('click', closeModal);
+  $('#clear-filter').addEventListener('click', () => { filterMember = null; render(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
+
+  $('#subtask-add-btn').addEventListener('click', addSubtask);
+  $('#subtask-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addSubtask(); }
+  });
+
   $('#task-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const id = $('#task-id').value;
@@ -681,22 +940,15 @@
       subtasks: modalSubtasks.map((s) => ({ ...s })),
     };
     if (!data.title) return;
-    if (id) Object.assign(state.tasks.find((t) => t.id === id), data);
-    else    state.tasks.push({ id: uid(), ...data });
-    persist();
+    if (id) updateTask(id, data); else createTask(data);
     closeModal();
-    render();
   });
 
   $('#delete-task').addEventListener('click', () => {
     const id = $('#task-id').value;
-    if (id && confirm('Delete this task?')) {
-      state.tasks = state.tasks.filter((t) => t.id !== id);
-      persist(); closeModal(); render();
-    }
+    if (id && confirm('Delete this task?')) { removeTask(id); closeModal(); }
   });
 
-  // ── View switching ───────────────────────────────────────────────────
   $('#view-switch').addEventListener('click', (e) => {
     const btn = e.target.closest('.seg-btn');
     if (!btn) return;
@@ -704,27 +956,11 @@
     render();
   });
 
-  // ── Wiring ──────────────────────────────────────────────────────────────
-  $('#add-task-btn').addEventListener('click', () => openModal(null));
-  $('#modal-close').addEventListener('click', closeModal);
-  $('#cancel-task').addEventListener('click', closeModal);
-  $('#clear-filter').addEventListener('click', () => { filterMember = null; render(); });
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.classList.contains('hidden')) closeModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!overlay.classList.contains('hidden')) closeModal();
+    else if (!adminOverlay.classList.contains('hidden')) closeAdmin();
+  });
 
-  // ── Render orchestration ─────────────────────────────────────────────────
-  function render() {
-    renderTeam();
-    renderFilterBanner();
-
-    const isBoard = view === 'board';
-    $('#board-view').classList.toggle('hidden', !isBoard);
-    $('#timeline-view').classList.toggle('hidden', isBoard);
-    $$('#view-switch .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
-
-    if (isBoard) renderBoard();
-    else         renderTimeline();
-  }
-
-  render();
+  // Boot screen stays until onAuthStateChanged fires the first time.
 })();
