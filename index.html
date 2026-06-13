@@ -28,6 +28,7 @@
         config, then deploy the Firestore rules.
       </p>
       <p class="auth-muted">See <code>docs/SETUP.md</code> for the 5-minute walkthrough.</p>
+      <button id="preview-ui" class="btn btn-ghost" style="margin-top:1.4rem">Preview the UI with sample data</button>
     </div>
   </div>
 
@@ -73,6 +74,7 @@
 
       <div class="view-switch" id="view-switch">
         <button class="seg-btn active" data-view="board">Board</button>
+        <button class="seg-btn" data-view="area">By area</button>
         <button class="seg-btn" data-view="timeline">Timeline</button>
       </div>
 
@@ -91,6 +93,13 @@
         </div>
       </div>
     </header>
+
+    <!-- Area toolbar: filter chips + manage -->
+    <div class="area-bar">
+      <span class="area-bar-label">Areas</span>
+      <div id="area-strip" class="area-strip"></div>
+      <button id="manage-areas-btn" class="btn btn-ghost btn-xs" title="Add or edit areas">＋ Manage areas</button>
+    </div>
 
     <!-- Active filter banner -->
     <div id="filter-banner" class="filter-banner hidden">
@@ -130,6 +139,11 @@
         <label class="field">
           <span>Description</span>
           <textarea id="f-desc" rows="3" placeholder="Add detail, links, acceptance criteria…"></textarea>
+        </label>
+
+        <label class="field">
+          <span>Area</span>
+          <select id="f-area"></select>
         </label>
 
         <div class="field">
@@ -223,6 +237,31 @@
         <p id="admin-error" class="auth-error hidden"></p>
 
         <ul id="user-list" class="user-list"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Areas modal (manage classification) ──────────────────────────────── -->
+  <div id="areas-overlay" class="modal-overlay hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>Manage areas</h2>
+        <button id="areas-close" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+
+      <div class="admin-body">
+        <p class="admin-hint">
+          Areas are how tasks are classified and grouped — e.g. components, data
+          sources, or clients. Anyone can manage them; changes sync to the team.
+        </p>
+
+        <form id="add-area-form" class="add-user-form">
+          <input id="a-name" type="text" required placeholder="New area name…" />
+          <button type="submit" class="btn btn-primary">Add</button>
+        </form>
+        <p id="areas-error" class="auth-error hidden"></p>
+
+        <ul id="area-list" class="user-list"></ul>
       </div>
     </div>
   </div>

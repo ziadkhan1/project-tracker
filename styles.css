@@ -111,6 +111,49 @@ html, body {
   color: var(--subtext);
 }
 
+/* ── Area toolbar + chips ───────────────────────────────────────────────── */
+.area-bar {
+  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  padding: .55rem 1.25rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.area-bar-label {
+  font-size: .68rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted);
+}
+.area-strip { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; flex: 1; }
+.area-empty { font-size: .76rem; color: var(--muted); }
+
+.area-chip {
+  display: inline-flex; align-items: center; gap: .35rem;
+  font: inherit; font-size: .76rem; font-weight: 600; color: var(--subtext);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 20px; padding: .25rem .65rem; cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.area-chip:hover { color: var(--text); }
+.area-chip.active { background: var(--text); color: #fff; border-color: var(--text); }
+.area-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.area-dot.lg { width: 12px; height: 12px; }
+
+.btn-xs { font-size: .76rem; padding: .3rem .6rem; }
+
+/* small classification chip shown on cards */
+.meta-chip {
+  font-size: .64rem; font-weight: 700; letter-spacing: .01em;
+  padding: .12rem .42rem; border-radius: 5px; white-space: nowrap;
+}
+
+/* area rename row in the manage modal */
+.area-rename {
+  flex: 1; font: inherit; font-size: .85rem; font-weight: 600;
+  padding: .4rem .55rem; border: 1px solid transparent; border-radius: 7px;
+  background: transparent; color: var(--text);
+}
+.area-rename:hover { border-color: var(--border); background: var(--surface); }
+.area-rename:focus { outline: none; border-color: var(--primary); background: var(--surface); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
+
 /* ── Board ──────────────────────────────────────────────────────────────── */
 .board {
   display: flex;
@@ -296,6 +339,35 @@ html, body {
 .card-subtask .cst-title { line-height: 1.3; }
 .card-subtask.done .cst-title { text-decoration: line-through; color: var(--muted); }
 .card-subtask.done { border-left-color: var(--p-low); }
+
+/* ── Compact / expandable card ──────────────────────────────────────────── */
+.card-chev {
+  font-size: .8rem; color: var(--muted); width: .9rem; text-align: center;
+  flex-shrink: 0; line-height: 1;
+}
+.card:hover .card-chev { color: var(--subtext); }
+.card.expanded { box-shadow: var(--shadow-md); border-color: #cdd2dc; }
+.card.expanded .card-title { white-space: normal; }
+
+.card-foot-right { display: flex; align-items: center; gap: .5rem; }
+.st-pill {
+  font-size: .66rem; font-weight: 700; color: var(--subtext);
+  background: var(--surface-2); border-radius: 20px; padding: .1rem .45rem;
+  display: inline-flex; align-items: center; gap: .2rem; white-space: nowrap;
+}
+.st-pill.complete { color: var(--p-low); }
+
+.btn-edit {
+  font: inherit; font-size: .72rem; font-weight: 600;
+  color: var(--primary); background: #eef2ff; border: none;
+  border-radius: 6px; padding: .25rem .55rem; cursor: pointer;
+}
+.btn-edit:hover { background: #e0e7ff; }
+
+/* expanded description shows in full (collapsed never renders it) */
+.card-desc-full { -webkit-line-clamp: unset; display: block; overflow: visible; margin-top: .5rem; }
+.card.expanded .mini-bar { margin: .55rem 0 .15rem; }
+.card.expanded .card-subtasks { margin-top: .4rem; }
 
 /* ── Paused task styling ────────────────────────────────────────────────── */
 .card.paused {

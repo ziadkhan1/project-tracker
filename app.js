@@ -42,19 +42,20 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
   }
 
   // ── Setup gate ─────────────────────────────────────────────────────────
+  // If firebase-config.js still has placeholders the app can't reach a backend —
+  // we show the setup screen, but still offer a no-backend UI preview (DEMO mode).
   const configReady = !Object.values(firebaseConfig).some(
     (v) => typeof v === 'string' && v.includes('REPLACE_ME')
   );
-  if (!configReady) {
-    showScreen('config');
-    return;
-  }
 
-  // ── Firebase init ──────────────────────────────────────────────────────
-  const app  = initializeApp(firebaseConfig);
-  const auth = getAuth(app);
-  const db   = getFirestore(app);
+  // ── Firebase init (only when configured) ───────────────────────────────
   const ownerKey = OWNER_EMAIL.trim().toLowerCase();
+  let app, auth, db;
+  if (configReady) {
+    app  = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db   = getFirestore(app);
+  }
 
   // ── Configuration ──────────────────────────────────────────────────────
   const COLUMNS = [
@@ -71,13 +72,50 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
   const DAY_WIDTH = 38;
 
   // ── App state ──────────────────────────────────────────────────────────
-  let state = { members: [], tasks: [] };
+  let state = { members: [], tasks: [], areas: [] };
   let currentUser = null;          // { email, name, photo, role }
   let filterMember = null;         // member id (== email key) or null
-  let view = 'board';
-  const collapsed = new Set();
+  let filterArea = null;           // area id or null
+  let view = 'board';              // 'board' (by status) | 'area' | 'timeline'
+  const collapsed = new Set();      // timeline: collapsed subtask rows
+  const expandedCards = new Set();  // board: which cards are expanded
+  let DEMO = false;                 // no-backend UI preview mode
   let unsubTasks = null;
   let unsubUsers = null;
+  let unsubAreas = null;
+
+  // Sample data for the no-backend UI preview (DEMO mode only).
+  const SEED = {
+    members: [
+      { id: 'm1', name: 'Aisha Khan' },
+      { id: 'm2', name: 'Ben Ortiz' },
+      { id: 'm3', name: 'Chen Wei' },
+      { id: 'm4', name: 'Dara Singh' },
+    ],
+    areas: [
+      { id: 'a-design', name: 'Design',         createdAt: 1 },
+      { id: 'a-fe',     name: 'Frontend',       createdAt: 2 },
+      { id: 'a-be',     name: 'Backend',        createdAt: 3 },
+      { id: 'a-infra',  name: 'Infrastructure', createdAt: 4 },
+    ],
+    tasks: [
+      { id: 't1', title: 'Define MVP scope', desc: 'Agree the feature cut for v1 with the team.', area: 'a-design', assignee: 'm1', reviewer: 'm3', priority: 'high', status: 'done', start: '2026-05-26', due: '2026-05-29', paused: false, subtasks: [] },
+      { id: 't2', title: 'Wireframe the board UI', desc: 'Low-fi mockups for the Kanban layout.', area: 'a-design', assignee: 'm3', reviewer: 'm1', priority: 'medium', status: 'done', start: '2026-05-28', due: '2026-06-02', paused: false, subtasks: [] },
+      { id: 't3', title: 'Set up component library', desc: 'Buttons, cards, modal, form fields.', area: 'a-fe', assignee: 'm2', reviewer: 'm3', priority: 'medium', status: 'progress', start: '2026-06-03', due: '2026-06-12', paused: false, subtasks: [
+        { id: 's1', title: 'Buttons', done: true },
+        { id: 's2', title: 'Card + badge', done: true },
+        { id: 's3', title: 'Modal + form fields', done: false },
+        { id: 's4', title: 'Avatars', done: false },
+      ] },
+      { id: 't4', title: 'Drag-and-drop between lanes', desc: 'Move cards across status columns.', area: 'a-fe', assignee: 'm2', reviewer: 'm1', priority: 'high', status: 'progress', start: '2026-06-04', due: '2026-06-10', paused: false, subtasks: [
+        { id: 's5', title: 'dragstart / dragend', done: true },
+        { id: 's6', title: 'drop updates status', done: false },
+      ] },
+      { id: 't5', title: 'Build sync API', desc: 'Endpoints to persist tasks.', area: 'a-be', assignee: 'm4', reviewer: 'm2', priority: 'high', status: 'review', start: '2026-06-06', due: '2026-06-15', paused: false, subtasks: [] },
+      { id: 't6', title: 'Provision hosting + CI', desc: 'Pages deploy + workflow.', area: 'a-infra', assignee: 'm1', reviewer: null, priority: 'low', status: 'todo', start: '2026-06-09', due: '2026-06-13', paused: false, subtasks: [] },
+      { id: 't7', title: 'Write onboarding copy', desc: 'Empty states and first-run hints.', area: null, assignee: 'm3', reviewer: null, priority: 'low', status: 'todo', start: '2026-06-10', due: '2026-06-16', paused: false, subtasks: [] },
+    ],
+  };
 
   // ── Date helpers ─────────────────────────────────────────────────────
   const parseDate = (s) => (s ? new Date(s + 'T00:00:00') : null);
@@ -95,6 +133,16 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
   };
   const uid = () => 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const sid = () => 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4);
+  const aid = () => 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+
+  // ── Areas (generic task classification) ────────────────────────────────
+  const AREA_COLORS = ['#4f46e5', '#0ea5e9', '#30a46c', '#f5a524', '#8b5cf6', '#e5484d', '#d6409f', '#0891b2', '#65a30d', '#c2410c'];
+  const areaById = (id) => state.areas.find((a) => a.id === id);
+  const areaName = (id) => areaById(id)?.name ?? '';
+  const areaColor = (id) => {
+    const i = state.areas.findIndex((a) => a.id === id);
+    return AREA_COLORS[(i < 0 ? 0 : i) % AREA_COLORS.length];
+  };
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -138,7 +186,9 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     return { label, overdue };
   }
 
-  const visibleTasks = () => state.tasks.filter((t) => !filterMember || t.assignee === filterMember);
+  const visibleTasks = () => state.tasks.filter((t) =>
+    (!filterMember || t.assignee === filterMember) &&
+    (!filterArea || (t.area || null) === filterArea));
 
   function taskProgress(t) {
     const subs = t.subtasks || [];
@@ -151,11 +201,17 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     render();
   }
 
+  function toggleCard(taskId) {
+    expandedCards.has(taskId) ? expandedCards.delete(taskId) : expandedCards.add(taskId);
+    render();
+  }
+
   // ── Firestore writes ─────────────────────────────────────────────────
   function normalizeTask(t) {
     return {
       title:    t.title || '',
       desc:     t.desc || '',
+      area:     t.area || null,
       assignee: t.assignee || null,
       reviewer: t.reviewer || null,
       priority: t.priority || 'medium',
@@ -169,16 +225,19 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
 
   async function createTask(data) {
     const id = uid();
+    if (DEMO) { state.tasks.push({ id, ...normalizeTask(data), createdAt: Date.now() }); render(); return; }
     try {
       await setDoc(doc(db, 'tasks', id), { ...normalizeTask(data), createdAt: Date.now() });
     } catch (e) { toast('Could not save task: ' + e.message); }
   }
   async function updateTask(id, data) {
+    if (DEMO) { const t = state.tasks.find((x) => x.id === id); if (t) Object.assign(t, normalizeTask(data)); render(); return; }
     try {
       await setDoc(doc(db, 'tasks', id), normalizeTask(data), { merge: true });
     } catch (e) { toast('Could not save task: ' + e.message); }
   }
   async function removeTask(id) {
+    if (DEMO) { state.tasks = state.tasks.filter((t) => t.id !== id); render(); return; }
     try { await deleteDoc(doc(db, 'tasks', id)); }
     catch (e) { toast('Could not delete task: ' + e.message); }
   }
@@ -187,13 +246,45 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     const t = state.tasks.find((x) => x.id === taskId);
     if (!t) return;
     const subs = (t.subtasks || []).map((s) => (s.id === subId ? { ...s, done } : s));
+    if (DEMO) { t.subtasks = subs; render(); return; }
     try { await setDoc(doc(db, 'tasks', taskId), { subtasks: subs }, { merge: true }); }
     catch (e) { toast('Could not update subtask: ' + e.message); }
   }
 
   async function moveTask(id, status) {
+    if (DEMO) { const t = state.tasks.find((x) => x.id === id); if (t) t.status = status; render(); return; }
     try { await setDoc(doc(db, 'tasks', id), { status }, { merge: true }); }
     catch (e) { toast('Could not move task: ' + e.message); }
+  }
+
+  async function setTaskArea(id, area) {
+    if (DEMO) { const t = state.tasks.find((x) => x.id === id); if (t) t.area = area; render(); return; }
+    try { await setDoc(doc(db, 'tasks', id), { area }, { merge: true }); }
+    catch (e) { toast('Could not move task: ' + e.message); }
+  }
+
+  // ── Area writes ─────────────────────────────────────────────────────────
+  function afterAreaChange() {
+    if (!$('#areas-overlay').classList.contains('hidden')) renderAreaList();
+    render();
+  }
+  async function createArea(name) {
+    const id = aid();
+    if (DEMO) { state.areas.push({ id, name, createdAt: Date.now() }); afterAreaChange(); return; }
+    try { await setDoc(doc(db, 'areas', id), { name, createdAt: Date.now() }); }
+    catch (e) { toast('Could not add area: ' + e.message); }
+  }
+  async function renameArea(id, name) {
+    if (DEMO) { const a = areaById(id); if (a) a.name = name; afterAreaChange(); return; }
+    try { await setDoc(doc(db, 'areas', id), { name }, { merge: true }); }
+    catch (e) { toast('Could not rename area: ' + e.message); }
+  }
+  async function removeArea(area) {
+    if (!confirm(`Delete area “${area.name}”? Tasks in it become Unclassified (their other details stay).`)) return;
+    if (filterArea === area.id) filterArea = null;
+    if (DEMO) { state.areas = state.areas.filter((a) => a.id !== area.id); afterAreaChange(); return; }
+    try { await deleteDoc(doc(db, 'areas', area.id)); }
+    catch (e) { toast('Could not delete area: ' + e.message); }
   }
 
   // ── Team strip + filter banner ─────────────────────────────────────────
@@ -211,10 +302,36 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     });
   }
 
+  function renderAreaStrip() {
+    const strip = $('#area-strip');
+    strip.innerHTML = '';
+    if (!state.areas.length) {
+      const hint = document.createElement('span');
+      hint.className = 'area-empty';
+      hint.textContent = 'No areas yet';
+      strip.appendChild(hint);
+      return;
+    }
+    state.areas.forEach((a) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'area-chip' + (filterArea === a.id ? ' active' : '');
+      chip.innerHTML = `<span class="area-dot" style="background:${areaColor(a.id)}"></span>${escapeHtml(a.name)}`;
+      chip.addEventListener('click', () => {
+        filterArea = (filterArea === a.id) ? null : a.id;
+        render();
+      });
+      strip.appendChild(chip);
+    });
+  }
+
   function renderFilterBanner() {
     const banner = $('#filter-banner');
-    if (filterMember) {
-      $('#filter-name').textContent = memberById(filterMember)?.name ?? '';
+    const parts = [];
+    if (filterMember) parts.push(memberById(filterMember)?.name ?? '');
+    if (filterArea)   parts.push(areaName(filterArea));
+    if (parts.length) {
+      $('#filter-name').textContent = parts.filter(Boolean).join(' · ');
       banner.classList.remove('hidden');
     } else {
       banner.classList.add('hidden');
@@ -222,22 +339,40 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
   }
 
   // ── Board view ───────────────────────────────────────────────────────
+  // Columns depend on the current grouping: by status (default) or by area.
+  function boardColumns() {
+    if (view === 'area') {
+      const cols = state.areas.map((a) => ({ id: a.id, title: a.name, accent: areaColor(a.id) }));
+      cols.push({ id: '__none', title: 'Unclassified', accent: '#97a0af' });
+      return cols;
+    }
+    return COLUMNS;
+  }
+
   function renderBoard() {
     const board = $('#board');
     board.innerHTML = '';
-    const visible = visibleTasks();
+    const byArea = view === 'area';
 
-    COLUMNS.forEach((col) => {
-      const tasks = visible.filter((t) => t.status === col.id);
+    if (byArea && !state.areas.length) {
+      board.innerHTML = '<p class="col-empty" style="padding:2rem">No areas yet — add some with “＋ Manage areas”.</p>';
+      return;
+    }
+
+    const visible = visibleTasks();
+    const taskInCol = (t, col) => byArea ? ((t.area || '__none') === col.id) : (t.status === col.id);
+
+    boardColumns().forEach((col) => {
+      const tasks = visible.filter((t) => taskInCol(t, col));
 
       const column = document.createElement('section');
       column.className = 'column';
-      column.dataset.status = col.id;
+      column.dataset.col = col.id;
 
       const head = document.createElement('div');
       head.className = 'column-head';
       head.innerHTML = `
-        <span class="column-title"><span class="col-accent" style="background:${col.accent}"></span>${col.title}</span>
+        <span class="column-title"><span class="col-accent" style="background:${col.accent}"></span>${escapeHtml(col.title)}</span>
         <span class="column-count">${tasks.length}</span>`;
       column.appendChild(head);
 
@@ -260,7 +395,13 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
         column.classList.remove('drag-over');
         const id = e.dataTransfer.getData('text/plain');
         const task = state.tasks.find((t) => t.id === id);
-        if (task && task.status !== col.id) moveTask(id, col.id);
+        if (!task) return;
+        if (byArea) {
+          const newArea = col.id === '__none' ? null : col.id;
+          if ((task.area || null) !== newArea) setTaskArea(id, newArea);
+        } else if (task.status !== col.id) {
+          moveTask(id, col.id);
+        }
       });
 
       board.appendChild(column);
@@ -269,47 +410,43 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
 
   function cardEl(t) {
     const card = document.createElement('article');
-    card.className = 'card' + (t.paused ? ' paused' : '');
+    const isOpen = expandedCards.has(t.id);
+    card.className = 'card' + (t.paused ? ' paused' : '') + (isOpen ? ' expanded' : '');
     card.draggable = true;
 
     const due = fmtDue(t.due);
     const subs = t.subtasks || [];
     const doneSubs = subs.filter((s) => s.done).length;
     const pct = taskProgress(t);
-    const open = !collapsed.has(t.id);
 
+    // Top row: title + priority/paused badges + expand chevron (always shown).
     card.innerHTML = `
       <div class="card-top">
         <span class="card-title">${escapeHtml(t.title)}</span>
         <span class="card-tags">
           ${t.paused ? '<span class="paused-badge">⏸ Paused</span>' : ''}
           <span class="badge ${t.priority}">${t.priority}</span>
+          <span class="card-chev">${isOpen ? '▾' : '▸'}</span>
         </span>
-      </div>
-      ${t.desc ? `<p class="card-desc">${escapeHtml(t.desc)}</p>` : ''}`;
+      </div>`;
 
-    if (subs.length) {
-      const tree = document.createElement('div');
-      tree.className = 'subtree';
-      tree.addEventListener('click', (e) => e.stopPropagation());
+    // Details (description + subtask checklist) only when expanded.
+    if (isOpen) {
+      if (t.desc) {
+        const d = document.createElement('p');
+        d.className = 'card-desc card-desc-full';
+        d.textContent = t.desc;
+        card.appendChild(d);
+      }
+      if (subs.length) {
+        const mini = document.createElement('div');
+        mini.className = 'mini-bar';
+        mini.innerHTML = `<span style="width:${pct}%"></span>`;
+        card.appendChild(mini);
 
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = 'subtree-toggle';
-      toggle.innerHTML =
-        `<span class="chev">${open ? '▾' : '▸'}</span> Subtasks ` +
-        `<span class="st-count ${doneSubs === subs.length ? 'complete' : ''}">${doneSubs}/${subs.length}</span>`;
-      toggle.addEventListener('click', () => toggleCollapse(t.id));
-      tree.appendChild(toggle);
-
-      const mini = document.createElement('div');
-      mini.className = 'mini-bar';
-      mini.innerHTML = `<span style="width:${pct}%"></span>`;
-      tree.appendChild(mini);
-
-      if (open) {
         const ul = document.createElement('ul');
         ul.className = 'card-subtasks';
+        ul.addEventListener('click', (e) => e.stopPropagation());  // don't collapse the card
         subs.forEach((st) => {
           const li = document.createElement('li');
           li.className = 'card-subtask' + (st.done ? ' done' : '');
@@ -323,11 +460,11 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
           li.append(cb, sp);
           ul.appendChild(li);
         });
-        tree.appendChild(ul);
+        card.appendChild(ul);
       }
-      card.appendChild(tree);
     }
 
+    // Footer: assignee + reviewer · (subtask pill when collapsed) · due · Edit (open).
     const foot = document.createElement('div');
     foot.className = 'card-foot';
     const meta = document.createElement('div');
@@ -336,9 +473,50 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     const rchip = reviewerChip(t.reviewer);
     if (rchip) meta.appendChild(rchip);
     foot.appendChild(meta);
-    const dueEl = document.createElement('span');
-    if (due) { dueEl.className = 'due ' + (due.overdue ? 'overdue' : ''); dueEl.textContent = '📅 ' + due.label; }
-    foot.appendChild(dueEl);
+
+    const right = document.createElement('div');
+    right.className = 'card-foot-right';
+    // Cross-context chip: show the area when grouped by status, the status when
+    // grouped by area, so the other dimension is always visible at a glance.
+    if (view === 'area') {
+      const s = STATUS[t.status];
+      if (s) {
+        const chip = document.createElement('span');
+        chip.className = 'meta-chip';
+        chip.style.color = s.accent;
+        chip.style.background = s.accent + '1f';
+        chip.textContent = s.title;
+        right.appendChild(chip);
+      }
+    } else if (t.area && areaById(t.area)) {
+      const chip = document.createElement('span');
+      chip.className = 'meta-chip';
+      chip.style.color = areaColor(t.area);
+      chip.style.background = areaColor(t.area) + '1f';
+      chip.textContent = areaName(t.area);
+      right.appendChild(chip);
+    }
+    if (subs.length && !isOpen) {
+      const pill = document.createElement('span');
+      pill.className = 'st-pill' + (doneSubs === subs.length ? ' complete' : '');
+      pill.textContent = `☑ ${doneSubs}/${subs.length}`;
+      right.appendChild(pill);
+    }
+    if (due) {
+      const dueEl = document.createElement('span');
+      dueEl.className = 'due ' + (due.overdue ? 'overdue' : '');
+      dueEl.textContent = '📅 ' + due.label;
+      right.appendChild(dueEl);
+    }
+    if (isOpen) {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'btn-edit';
+      edit.textContent = 'Edit';
+      edit.addEventListener('click', (e) => { e.stopPropagation(); openModal(t); });
+      right.appendChild(edit);
+    }
+    foot.appendChild(right);
     card.appendChild(foot);
 
     card.addEventListener('dragstart', (e) => {
@@ -347,7 +525,7 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
       card.classList.add('dragging');
     });
     card.addEventListener('dragend', () => card.classList.remove('dragging'));
-    card.addEventListener('click', () => openModal(t));
+    card.addEventListener('click', () => toggleCard(t.id));
     return card;
   }
 
@@ -646,6 +824,8 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     $('#f-assignee').innerHTML = '<option value="">Unassigned</option>' + people;
     $('#f-reviewer').innerHTML = '<option value="">No reviewer</option>' + people;
     $('#f-status').innerHTML = COLUMNS.map((c) => `<option value="${c.id}">${c.title}</option>`).join('');
+    $('#f-area').innerHTML = '<option value="">Unclassified</option>' +
+      state.areas.map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
   }
 
   function openModal(task) {
@@ -655,6 +835,7 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     $('#task-id').value    = isEdit ? task.id : '';
     $('#f-title').value    = isEdit ? task.title : '';
     $('#f-desc').value     = isEdit ? task.desc : '';
+    $('#f-area').value     = isEdit ? (task.area || '') : (view === 'area' && filterArea ? filterArea : '');
     $('#f-assignee').value = isEdit ? (task.assignee || '') : '';
     $('#f-reviewer').value = isEdit ? (task.reviewer || '') : '';
     $('#f-priority').value = isEdit ? task.priority : 'medium';
@@ -774,6 +955,69 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     catch (e) { toast('Could not remove user: ' + e.message); }
   }
 
+  // ── Areas: manage modal ─────────────────────────────────────────────────
+  const areasOverlay = $('#areas-overlay');
+
+  function openAreas() {
+    $('#areas-error').classList.add('hidden');
+    $('#add-area-form').reset();
+    renderAreaList();
+    areasOverlay.classList.remove('hidden');
+    $('#a-name').focus();
+  }
+  const closeAreas = () => areasOverlay.classList.add('hidden');
+
+  function renderAreaList() {
+    const list = $('#area-list');
+    list.innerHTML = '';
+    if (!state.areas.length) {
+      list.innerHTML = '<li class="user-empty">No areas yet.</li>';
+      return;
+    }
+    state.areas.forEach((a) => {
+      const li = document.createElement('li');
+      li.className = 'user-row';
+
+      const dot = document.createElement('span');
+      dot.className = 'area-dot lg';
+      dot.style.background = areaColor(a.id);
+
+      const input = document.createElement('input');
+      input.className = 'area-rename';
+      input.value = a.name;
+      input.addEventListener('change', () => {
+        const v = input.value.trim();
+        if (v && v !== a.name) renameArea(a.id, v); else input.value = a.name;
+      });
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'icon-btn user-del';
+      del.textContent = '🗑';
+      del.title = 'Delete area';
+      del.addEventListener('click', () => removeArea(a));
+
+      li.append(dot, input, del);
+      list.appendChild(li);
+    });
+  }
+
+  async function addArea(e) {
+    e.preventDefault();
+    const name = $('#a-name').value.trim();
+    const err = $('#areas-error');
+    err.classList.add('hidden');
+    if (!name) return;
+    if (state.areas.some((a) => a.name.toLowerCase() === name.toLowerCase())) {
+      err.textContent = 'That area already exists.';
+      err.classList.remove('hidden');
+      return;
+    }
+    await createArea(name);
+    $('#add-area-form').reset();
+    $('#a-name').focus();
+  }
+
   // ── Live subscriptions ──────────────────────────────────────────────────
   function subscribe() {
     unsubUsers = onSnapshot(collection(db, 'allowedUsers'), (snap) => {
@@ -798,27 +1042,37 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
         .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
       render();
     }, (err) => toast('Lost connection to tasks: ' + err.message));
+
+    unsubAreas = onSnapshot(collection(db, 'areas'), (snap) => {
+      state.areas = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || a.name.localeCompare(b.name));
+      if (!areasOverlay.classList.contains('hidden')) renderAreaList();
+      render();
+    }, (err) => toast('Lost connection to areas: ' + err.message));
   }
 
   function unsubscribe() {
     if (unsubTasks) { unsubTasks(); unsubTasks = null; }
     if (unsubUsers) { unsubUsers(); unsubUsers = null; }
-    state = { members: [], tasks: [] };
+    if (unsubAreas) { unsubAreas(); unsubAreas = null; }
+    state = { members: [], tasks: [], areas: [] };
   }
 
   // ── Render orchestration ─────────────────────────────────────────────────
   function render() {
     if (!currentUser) return;
     renderTeam();
+    renderAreaStrip();
     renderFilterBanner();
 
-    const isBoard = view === 'board';
-    $('#board-view').classList.toggle('hidden', !isBoard);
-    $('#timeline-view').classList.toggle('hidden', isBoard);
+    const isTimeline = view === 'timeline';
+    $('#board-view').classList.toggle('hidden', isTimeline);
+    $('#timeline-view').classList.toggle('hidden', !isTimeline);
     $$('#view-switch .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
 
-    if (isBoard) renderBoard();
-    else         renderTimeline();
+    if (isTimeline) renderTimeline();
+    else            renderBoard();
   }
 
   // ── User chip ─────────────────────────────────────────────────────────
@@ -835,6 +1089,20 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     }
     $('#user-name').textContent = currentUser.name || currentUser.email;
     $('#admin-btn').classList.toggle('hidden', currentUser.role !== 'admin');
+  }
+
+  // ── No-backend UI preview (DEMO) ─────────────────────────────────────────
+  function startDemo() {
+    DEMO = true;
+    currentUser = { email: 'demo', name: 'Demo user', photo: '', role: 'member' };
+    state = structuredClone(SEED);
+    filterMember = null;
+    paintUserChip();
+    $('#admin-btn').classList.add('hidden');
+    const sub = document.querySelector('.brand-sub');
+    if (sub) sub.textContent = 'Team board · UI preview (no backend)';
+    showScreen('app');
+    render();
   }
 
   // ── Auth flow ───────────────────────────────────────────────────────────
@@ -879,15 +1147,21 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     showScreen('app');
   }
 
-  onAuthStateChanged(auth, (user) => {
-    unsubscribe();
-    currentUser = null;
-    if (user) {
-      resolveAccess(user);
-    } else {
-      showScreen('signin');
-    }
-  });
+  // Decide the initial screen: config gate (with preview escape hatch) when the
+  // backend isn't set up, otherwise resolve auth state.
+  if (configReady) {
+    onAuthStateChanged(auth, (user) => {
+      unsubscribe();
+      currentUser = null;
+      if (user) {
+        resolveAccess(user);
+      } else {
+        showScreen('signin');
+      }
+    });
+  } else {
+    showScreen('config');
+  }
 
   async function doSignIn() {
     const err = $('#signin-error');
@@ -905,18 +1179,24 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
 
   // ── Wiring ──────────────────────────────────────────────────────────────
   $('#google-signin').addEventListener('click', doSignIn);
+  $('#preview-ui')?.addEventListener('click', startDemo);
   $('#denied-signout').addEventListener('click', () => signOut(auth));
-  $('#signout-btn').addEventListener('click', () => signOut(auth));
+  $('#signout-btn').addEventListener('click', () => { if (DEMO) { location.reload(); return; } signOut(auth); });
 
   $('#admin-btn').addEventListener('click', openAdmin);
   $('#admin-close').addEventListener('click', closeAdmin);
   $('#add-user-form').addEventListener('submit', addUser);
   adminOverlay.addEventListener('click', (e) => { if (e.target === adminOverlay) closeAdmin(); });
 
+  $('#manage-areas-btn').addEventListener('click', openAreas);
+  $('#areas-close').addEventListener('click', closeAreas);
+  $('#add-area-form').addEventListener('submit', addArea);
+  areasOverlay.addEventListener('click', (e) => { if (e.target === areasOverlay) closeAreas(); });
+
   $('#add-task-btn').addEventListener('click', () => openModal(null));
   $('#modal-close').addEventListener('click', closeModal);
   $('#cancel-task').addEventListener('click', closeModal);
-  $('#clear-filter').addEventListener('click', () => { filterMember = null; render(); });
+  $('#clear-filter').addEventListener('click', () => { filterMember = null; filterArea = null; render(); });
   overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
 
   $('#subtask-add-btn').addEventListener('click', addSubtask);
@@ -930,6 +1210,7 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     const data = {
       title:    $('#f-title').value.trim(),
       desc:     $('#f-desc').value.trim(),
+      area:     $('#f-area').value || null,
       assignee: $('#f-assignee').value || null,
       reviewer: $('#f-reviewer').value || null,
       priority: $('#f-priority').value,
@@ -960,6 +1241,7 @@ import { firebaseConfig, OWNER_EMAIL } from './firebase-config.js';
     if (e.key !== 'Escape') return;
     if (!overlay.classList.contains('hidden')) closeModal();
     else if (!adminOverlay.classList.contains('hidden')) closeAdmin();
+    else if (!areasOverlay.classList.contains('hidden')) closeAreas();
   });
 
   // Boot screen stays until onAuthStateChanged fires the first time.

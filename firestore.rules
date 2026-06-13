@@ -55,5 +55,10 @@ service cloud.firestore {
     match /tasks/{taskId} {
       allow read, write: if isAllowed();
     }
+
+    // Areas are content (task classification), so any allowed user may manage them.
+    match /areas/{areaId} {
+      allow read, write: if isAllowed();
+    }
   }
 }
