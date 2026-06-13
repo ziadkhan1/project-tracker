@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Project Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗂️</text></svg>" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ── Top bar ──────────────────────────────────────────────────────────── -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">🗂️</span>
+      <div>
+        <h1 class="brand-title">Project Tracker</h1>
+        <p class="brand-sub">Team board</p>
+      </div>
+    </div>
+
+    <div class="view-switch" id="view-switch">
+      <button class="seg-btn active" data-view="board">Board</button>
+      <button class="seg-btn" data-view="timeline">Timeline</button>
+    </div>
+
+    <div class="topbar-right">
+      <!-- Team avatars double as per-member filters -->
+      <div id="team-strip" class="team-strip" title="Filter by assignee"></div>
+      <button id="add-task-btn" class="btn btn-primary">+ New task</button>
+    </div>
+  </header>
+
+  <!-- ── Active filter banner ─────────────────────────────────────────────── -->
+  <div id="filter-banner" class="filter-banner hidden">
+    <span>Filtered by <strong id="filter-name"></strong></span>
+    <button id="clear-filter" class="btn-link">Clear</button>
+  </div>
+
+  <!-- ── Views ────────────────────────────────────────────────────────────── -->
+  <main class="main">
+    <!-- Board (developer) view -->
+    <section id="board-view">
+      <div id="board" class="board"></div>
+    </section>
+
+    <!-- Timeline (project-wide) view -->
+    <section id="timeline-view" class="hidden">
+      <div id="timeline-summary" class="timeline-summary"></div>
+      <div id="gantt" class="gantt-wrap"></div>
+    </section>
+  </main>
+
+  <!-- ── Task modal (add / edit) ──────────────────────────────────────────── -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="modal-title">New task</h2>
+        <button id="modal-close" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+
+      <form id="task-form" class="task-form">
+        <input type="hidden" id="task-id" />
+
+        <label class="field">
+          <span>Title</span>
+          <input id="f-title" type="text" required placeholder="What needs doing?" />
+        </label>
+
+        <label class="field">
+          <span>Description</span>
+          <textarea id="f-desc" rows="3" placeholder="Add detail, links, acceptance criteria…"></textarea>
+        </label>
+
+        <div class="field">
+          <span>Subtasks <em id="subtask-progress" class="subtask-progress"></em></span>
+          <ul id="subtask-list" class="subtask-list"></ul>
+          <div class="subtask-add">
+            <input id="subtask-input" type="text" placeholder="Add a subtask, press Enter…" />
+            <button type="button" id="subtask-add-btn" class="btn btn-ghost">Add</button>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <label class="field">
+            <span>Assignee</span>
+            <select id="f-assignee"></select>
+          </label>
+
+          <label class="field">
+            <span>Reviewer</span>
+            <select id="f-reviewer"></select>
+          </label>
+        </div>
+
+        <div class="field-row">
+          <label class="field">
+            <span>Priority</span>
+            <select id="f-priority">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Status</span>
+            <select id="f-status"></select>
+          </label>
+        </div>
+
+        <div class="field-row">
+          <label class="field">
+            <span>Start date</span>
+            <input id="f-start" type="date" />
+          </label>
+
+          <label class="field">
+            <span>Due date</span>
+            <input id="f-due" type="date" />
+          </label>
+        </div>
+
+        <label class="check-row">
+          <input type="checkbox" id="f-paused" />
+          <span>⏸ Paused — temporarily on hold</span>
+        </label>
+
+        <div class="modal-foot">
+          <button type="button" id="delete-task" class="btn btn-danger hidden">Delete</button>
+          <div class="modal-foot-right">
+            <button type="button" id="cancel-task" class="btn btn-ghost">Cancel</button>
+            <button type="submit" class="btn btn-primary">Save</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
